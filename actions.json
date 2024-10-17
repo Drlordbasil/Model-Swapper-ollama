@@ -1,0 +1,38 @@
+{
+    "analyze_code": {
+        "description": "Analyzes Python code to provide a line-by-line explanation of what each line does.",
+        "parameters": {     
+            "code": "The Python code to analyze"
+        }
+    },
+    "find_bugs": {
+        "description": "Analyzes Python code to find logical errors or potential bugs.",
+        "parameters": {
+            "code": "The Python code to analyze"
+        }
+    },
+    "generate_docstring": {
+        "description": "Generates a detailed docstring for a Python function.",
+        "parameters": {
+            "code": "The Python code to generate a docstring for"
+        }
+    },
+    "suggest_optimization": {
+        "description": "Suggest performance optimizations for Python code.",
+        "parameters": {
+            "code": "The Python code to optimize"
+        }
+    },
+    "generate_test": {
+        "description": "Generate unit tests for a Python function.",
+        "parameters": { 
+            "code": "The Python code to generate tests for"
+        }
+    },
+    "explain_code": {
+        "description": "Provide an explanation of the given Python code.",
+        "parameters": {
+            "code": "The Python code to explain"
+        }
+    }   
+}   
