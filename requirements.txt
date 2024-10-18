@@ -1,0 +1,5 @@
+ollama
+torch
+numpy
+nltk
+scikit-learn
