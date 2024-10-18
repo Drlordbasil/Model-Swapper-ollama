@@ -14,13 +14,12 @@ import numpy as np
 import nltk
 from sklearn.neighbors import NearestNeighbors
 import warnings
-import json
-actions = json.load(open('actions.json'))
+
 warnings.filterwarnings("ignore", category=FutureWarning, module="transformers.tokenization_utils_base")
 nltk.download('punkt', quiet=True)
 
 # Hyperparameters
-alpha = 0.001  # Learning rate
+alpha = 0.001  # Learning rate for optimizer
 gamma = 0.9    # Discount factor
 epsilon = 0.2  # Exploration rate
 num_episodes = 100  # Number of training iterations
@@ -29,8 +28,50 @@ memory_size = 100
 target_update = 10
 
 # Define tools with real functionalities
-tools = actions
-    
+tools = {
+    "analyze_code": {
+        "description": "Analyze Python code for syntax errors, PEP8 compliance, and provide basic statistics.",
+        "parameters": {
+            "code": "The Python code to analyze."
+        }
+    },
+    "generate_docstring": {
+        "description": "Generate a detailed docstring for a Python function, including parameters and return types.",
+        "parameters": {
+            "function_code": "The Python function code."
+        }
+    },
+    "suggest_optimization": {
+        "description": "Suggest performance optimizations and best practices for a given Python code snippet.",
+        "parameters": {
+            "code": "The Python code to optimize."
+        }
+    },
+    "generate_test": {
+        "description": "Generate unit tests for a given Python function using unittest or pytest frameworks.",
+        "parameters": {
+            "function_code": "The Python function code to test."
+        }
+    },
+    "explain_code": {
+        "description": "Provide a line-by-line explanation of what the given Python code does.",
+        "parameters": {
+            "code": "The Python code to explain."
+        }
+    },
+    "find_bugs": {
+        "description": "Analyze Python code to find logical errors or potential bugs.",
+        "parameters": {
+            "code": "The Python code to analyze for bugs."
+        }
+    },
+    "test_code_locally": {
+        "description": "Execute Python code locally and capture any exceptions or output.",
+        "parameters": {
+            "code": "The Python code to execute."
+        }
+    }
+}
 
 def analyze_code(code):
     """
@@ -196,13 +237,26 @@ def model_supports_generate(model_name):
     except Exception:
         return False
 
+def model_supports_embed(model_name):
+    """
+    Checks if the model supports the 'embed' method.
+    """
+    try:
+        # Try to embed an empty string to test if model supports embed
+        response = ollama.embed(model=model_name, input="")
+        return True
+    except Exception:
+        return False
+
 def get_model_capabilities(model_name):
     """
-    Returns the capabilities of the model ('generate').
+    Returns the capabilities of the model ('generate', 'embed', or both).
     """
     capabilities = []
     if model_supports_generate(model_name):
         capabilities.append('generate')
+    if model_supports_embed(model_name):
+        capabilities.append('embed')
     return capabilities
 
 def ensure_model_available(model_name):
@@ -220,23 +274,53 @@ def ensure_model_available(model_name):
             return False
     return True
 
+def get_embeddings(text_chunks, embedding_model):
+    """
+    Generates embeddings for the given text chunks using the specified embedding model.
+    """
+    try:
+        embeddings = ollama.embed(model=embedding_model, input=text_chunks)["embeddings"]
+        return embeddings
+    except Exception as e:
+        print(f"Error generating embeddings with {embedding_model}: {str(e)}")
+        return None
+
+def chunk_text(text, max_length=512):
+    """
+    Splits text into chunks suitable for embedding.
+    """
+    sentences = nltk.sent_tokenize(text)
+    chunks = []
+    current_chunk = ''
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) <= max_length:
+            current_chunk += ' ' + sentence
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    return chunks
+
 # Define the task
 task_prompt = input("Enter your Python coding task or question: ")
 
 # List available models
 models_info = ollama.list().get("models", [])
 model_names = [model['name'] for model in models_info]
-print("\nAvailable models:", model_names)
+num_models = len(model_names)
 
-# Filter out models that do not support 'generate'
+print("Available models:", model_names)
+
+# Filter out models that do not support 'generate' or 'embed'
 model_capabilities = {}
 for model_name in model_names:
     capabilities = get_model_capabilities(model_name)
-    if 'generate' in capabilities:
+    if capabilities:
         model_capabilities[model_name] = capabilities
 
 if not model_capabilities:
-    print("No models with 'generate' capability found.")
+    print("No models with supported capabilities found.")
     exit()
 
 # Define the neural network model
@@ -279,89 +363,80 @@ def select_action(state, epsilon):
             max_q = q_values.max().item()
             actions = (q_values == max_q).nonzero(as_tuple=True)[1]
             action = random.choice(actions.tolist())
-        print("Exploiting: Selected best model based on Q-values.")
+            print("Exploiting: Selected best model based on Q-values.")
     return action
 
 def generate_response(model, prompt):
     """
     Generates a response using the specified model and handles tool execution if needed.
     """
-    system_prompt = f"""You are an AI assistant specialized in Python programming.
-
-You have access to the following tools:
+    system_prompt = f"""You are an AI assistant specialized in Python programming. You have access to the following tools:
 
 {json.dumps(tools, indent=2)}
 
-When assisting the user:
+Guidelines:
+- Analyze the user's question carefully.
+- If a tool is needed, respond with a JSON object specifying the tool and parameters.
+- Provide detailed explanations and code examples.
+- Before presenting code to the user, test it locally using the 'test_code_locally' tool.
+- Follow Python best practices and PEP8 conventions.
+- Structure your response with clear headings and code blocks.
 
-- Carefully read and understand the user's request.
-- If you need to use a tool, respond in the following JSON format:
+Examples:
+User: How can I optimize this code snippet?
+[User provides code]
 
+Assistant:
 {{
-    "tool": "<tool_name>",
+    "tool": "suggest_optimization",
     "params": {{
-        "<param1>": "<value1>",
-        "<param2>": "<value2>",
-        ...
+        "code": "[User's code]"
     }}
 }}
 
-- Do not include any other text in your response when calling a tool.
-- After receiving the tool result, incorporate it into your final answer.
-- Provide clear explanations and code examples.
-- Ensure any code you provide is tested using the 'test_code_locally' tool before sharing.
-- Follow Python best practices and PEP8 conventions.
+After the tool execution, incorporate the results into your final answer.
 
-Proceed to assist the user."""
+Now, proceed to assist the user."""
 
     try:
-        # Start the conversation
-        messages = [
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': prompt}
-        ]
-        tools_list = [
-            {
-                'type': 'function',
-                'function': {
-                    'name': tool_name,
-                    'description': tool_info['description'],
-                    'parameters': {
-                        'type': 'object',
-                        'properties': {
-                            param: {'type': 'string', 'description': desc}
-                            for param, desc in tool_info['parameters'].items()
-                        },
-                        'required': list(tool_info['parameters'].keys())
-                    }
-                }
-            } for tool_name, tool_info in tools.items()
-        ]
-
-        # Get the assistant's response
+        # Initial response
         response = ollama.chat(
             model=model,
-            messages=messages,
-            tools=tools_list
+            messages=[{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': prompt}],
+            tools=[
+                {
+                    'type': 'function',
+                    'function': {
+                        'name': tool_name,
+                        'description': tool_info['description'],
+                        'parameters': {
+                            'type': 'object',
+                            'properties': {param: {'type': 'string', 'description': desc}
+                                           for param, desc in tool_info['parameters'].items()},
+                            'required': list(tool_info['parameters'].keys()),
+                        },
+                    },
+                } for tool_name, tool_info in tools.items()
+            ],
         )
         assistant_message = response['message']
-
-        # Check if the assistant called a tool
+        # Check if the assistant decided to use a tool
         if assistant_message.get('tool_calls'):
             for tool_call in assistant_message['tool_calls']:
                 tool_name = tool_call['function']['name']
                 params = tool_call['function']['arguments']
                 tool_result = execute_tool(tool_name, params)
                 # Add the tool's response to the conversation
-                messages.append(assistant_message)
-                messages.append({'role': 'tool', 'content': tool_result})
-                # Get the assistant's final response
-                final_response = ollama.chat(
+                response = ollama.chat(
                     model=model,
-                    messages=messages,
-                    tools=tools_list
+                    messages=[
+                        {'role': 'system', 'content': system_prompt},
+                        {'role': 'user', 'content': prompt},
+                        assistant_message,
+                        {'role': 'tool', 'content': tool_result},
+                    ],
                 )
-                return final_response['message']['content'].strip()
+                return response['message']['content'].strip()
         else:
             # No tool was used; return the assistant's content
             return assistant_message['content'].strip()
@@ -374,11 +449,44 @@ def evaluate_response(response, action):
     """
     Evaluates the response using a reviewer model and returns a numerical score.
     """
-    # Simplified evaluation
-    if response:
-        return 10  # Assign maximum score for non-empty response
-    else:
-        return 0
+    reviewer_models = [model for model in capable_model_names if model != capable_model_names[action] and 'generate' in model_capabilities[model]]
+    if not reviewer_models:
+        return 5  # Neutral score if no other models are available
+    reviewer_model = random.choice(reviewer_models)
+    review_prompt = f"""As a Python expert, evaluate the following response to the user's task: '{task_prompt}'
+
+Response:
+{response}
+
+Criteria for evaluation (score from 1 to 10):
+1. Accuracy and relevance of the Python code or information provided.
+2. Effective use of Python-specific tools (if applicable).
+3. Clarity and coherence of the explanation.
+4. Completeness in addressing all aspects of the Python coding task.
+5. Adherence to Python best practices and conventions.
+6. Quality of code implementation (if code was generated).
+7. Presence and quality of tests (if applicable).
+8. Whether the code was tested locally and works as intended.
+
+Provide only the numerical score and a brief justification.
+
+Example:
+Score: 8
+Justification: The code is accurate but lacks unit tests."""
+
+    try:
+        review_response = ollama.generate(model=reviewer_model, prompt=review_prompt)
+        review_text = review_response['response'].strip()
+        # Extract numerical score
+        match = re.search(r'Score:\s*(\d{1,2})', review_text)
+        if match:
+            score = int(match.group(1))
+            if 1 <= score <= 10:
+                return score
+        return 5  # Neutral score if parsing fails
+    except Exception as e:
+        print(f"Error evaluating response with {reviewer_model}: {str(e)}")
+        return 5
 
 # Main training loop
 for episode in range(num_episodes):
@@ -392,7 +500,13 @@ for episode in range(num_episodes):
     if not ensure_model_available(selected_model):
         continue
 
-    response = generate_response(selected_model, task_prompt)
+    capabilities = model_capabilities[selected_model]
+
+    if 'generate' in capabilities:
+        response = generate_response(selected_model, task_prompt)
+    else:
+        print(f"Model {selected_model} does not support 'generate'. Skipping.")
+        continue
 
     if response is None:
         reward = 0
@@ -452,4 +566,5 @@ else:
 
 # Save the model
 torch.save(policy_net.state_dict(), 'policy_net.pth')
+
 print("\nModel saved to policy_net.pth")
