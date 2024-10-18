@@ -14,18 +14,24 @@ import numpy as np
 import nltk
 from sklearn.neighbors import NearestNeighbors
 import warnings
+import logging
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="transformers.tokenization_utils_base")
 nltk.download('punkt', quiet=True)
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # Hyperparameters
-alpha = 0.001  # Learning rate for optimizer
-gamma = 0.9    # Discount factor
-epsilon = 0.2  # Exploration rate
-num_episodes = 100  # Number of training iterations
-batch_size = 16
-memory_size = 100
-target_update = 10
+ALPHA = 0.001        # Learning rate for optimizer
+GAMMA = 0.9          # Discount factor (not used currently)
+EPSILON = 0.2        # Initial exploration rate
+MIN_EPSILON = 0.01   # Minimum exploration rate
+DECAY_RATE = 0.995   # Decay rate for epsilon
+NUM_EPISODES = 100   # Number of training iterations
+BATCH_SIZE = 16
+MEMORY_SIZE = 100
+TARGET_UPDATE = 10
 
 # Define tools with real functionalities
 tools = {
@@ -187,6 +193,15 @@ def find_bugs(code):
 def test_code_locally(code):
     """
     Executes Python code locally and captures any exceptions or output.
+
+    Args:
+        code (str): The Python code to execute.
+
+    Returns:
+        str: Execution output or error message.
+
+    Raises:
+        RuntimeError: If there is an error during code execution.
     """
     try:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as temp_file:
@@ -203,47 +218,66 @@ def test_code_locally(code):
         else:
             return f"Code executed successfully. Output:\n{result.stdout}"
     except Exception as e:
-        return f"Error executing code: {str(e)}"
+        raise RuntimeError(f"Error executing code: {str(e)}")
 
 def execute_tool(tool_name, params):
     """
     Executes the specified tool with given parameters.
-    """
-    if tool_name == "analyze_code":
-        return analyze_code(params["code"])
-    elif tool_name == "generate_docstring":
-        return generate_docstring(params["function_code"])
-    elif tool_name == "suggest_optimization":
-        return suggest_optimization(params["code"])
-    elif tool_name == "generate_test":
-        return generate_test(params["function_code"])
-    elif tool_name == "explain_code":
-        return explain_code(params["code"])
-    elif tool_name == "find_bugs":
-        return find_bugs(params["code"])
-    elif tool_name == "test_code_locally":
-        return test_code_locally(params["code"])
-    else:
-        return f"Unknown tool: {tool_name}"
 
-def model_supports_generate(model_name):
+    Args:
+        tool_name (str): The name of the tool to execute.
+        params (dict): The parameters required for the tool.
+
+    Returns:
+        str: The output from the tool execution.
+
+    Raises:
+        ValueError: If the tool name is unknown.
+    """
+    tools_mapping = {
+        "analyze_code": analyze_code,
+        "generate_docstring": generate_docstring,
+        "suggest_optimization": suggest_optimization,
+        "generate_test": generate_test,
+        "explain_code": explain_code,
+        "find_bugs": find_bugs,
+        "test_code_locally": test_code_locally,
+    }
+    if tool_name in tools_mapping:
+        return tools_mapping[tool_name](**params)
+    else:
+        raise ValueError(f"Unknown tool: {tool_name}")
+
+def does_model_support_generate(model_name):
     """
     Checks if the model supports the 'generate' method.
+
+    Args:
+        model_name (str): The name of the model to check.
+
+    Returns:
+        bool: True if the model supports 'generate', False otherwise.
     """
     try:
-        # Try to generate an empty prompt to test if model supports generate
-        response = ollama.generate(model=model_name, prompt="", options={"num_predict": 1})
+        # Attempt to generate an empty prompt to test if the model supports 'generate'
+        ollama.generate(model=model_name, prompt="", options={"num_predict": 1})
         return True
     except Exception:
         return False
 
-def model_supports_embed(model_name):
+def does_model_support_embed(model_name):
     """
     Checks if the model supports the 'embed' method.
+
+    Args:
+        model_name (str): The name of the model to check.
+
+    Returns:
+        bool: True if the model supports 'embed', False otherwise.
     """
     try:
-        # Try to embed an empty string to test if model supports embed
-        response = ollama.embed(model=model_name, input="")
+        # Attempt to embed an empty string to test if the model supports 'embed'
+        ollama.embed(model=model_name, input="")
         return True
     except Exception:
         return False
@@ -253,9 +287,9 @@ def get_model_capabilities(model_name):
     Returns the capabilities of the model ('generate', 'embed', or both).
     """
     capabilities = []
-    if model_supports_generate(model_name):
+    if does_model_support_generate(model_name):
         capabilities.append('generate')
-    if model_supports_embed(model_name):
+    if does_model_support_embed(model_name):
         capabilities.append('embed')
     return capabilities
 
@@ -274,16 +308,28 @@ def ensure_model_available(model_name):
             return False
     return True
 
-def get_embeddings(text_chunks, embedding_model):
+def generate_embeddings(text_chunks, embedding_model):
     """
     Generates embeddings for the given text chunks using the specified embedding model.
+
+    Args:
+        text_chunks (list of str): The text chunks to generate embeddings for.
+        embedding_model (str): The name of the embedding model to use.
+
+    Returns:
+        list: A list of embeddings.
+
+    Raises:
+        ValueError: If embeddings could not be generated.
     """
     try:
-        embeddings = ollama.embed(model=embedding_model, input=text_chunks)["embeddings"]
+        response = ollama.embed(model=embedding_model, input=text_chunks)
+        embeddings = response.get("embeddings")
+        if not embeddings:
+            raise ValueError("No embeddings returned by the model.")
         return embeddings
     except Exception as e:
-        print(f"Error generating embeddings with {embedding_model}: {str(e)}")
-        return None
+        raise ValueError(f"Error generating embeddings with {embedding_model}: {str(e)}")
 
 def chunk_text(text, max_length=512):
     """
@@ -302,73 +348,208 @@ def chunk_text(text, max_length=512):
         chunks.append(current_chunk.strip())
     return chunks
 
-# Define the task
-task_prompt = input("Enter your Python coding task or question: ")
-
-# List available models
-models_info = ollama.list().get("models", [])
-model_names = [model['name'] for model in models_info]
-num_models = len(model_names)
-
-print("Available models:", model_names)
-
-# Filter out models that do not support 'generate' or 'embed'
-model_capabilities = {}
-for model_name in model_names:
-    capabilities = get_model_capabilities(model_name)
-    if capabilities:
-        model_capabilities[model_name] = capabilities
-
-if not model_capabilities:
-    print("No models with supported capabilities found.")
-    exit()
-
-# Define the neural network model
-class DQN(nn.Module):
-    def __init__(self, num_inputs, num_outputs):
-        super(DQN, self).__init__()
-        self.fc1 = nn.Linear(num_inputs, 128)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(128, num_outputs)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        return x
-
-# Initialize DQN and target network
-state_size = 1  # The state is fixed (the task)
-action_size = len(model_capabilities)  # Number of models with capabilities
-policy_net = DQN(state_size, action_size)
-target_net = DQN(state_size, action_size)
-target_net.load_state_dict(policy_net.state_dict())
-target_net.eval()
-
-optimizer = optim.Adam(policy_net.parameters(), lr=alpha)
-memory = []
-
-capable_model_names = list(model_capabilities.keys())
-
-def select_action(state, epsilon):
+def load_config():
     """
-    Selects an action (model) based on epsilon-greedy policy.
+    Loads hyperparameters and configuration settings.
+
+    Returns:
+        dict: A dictionary containing configuration parameters.
+    """
+    config = {
+        'alpha': 0.001,       # Learning rate for optimizer
+        'gamma': 0.9,         # Discount factor (not used currently)
+        'epsilon': 0.2,       # Exploration rate
+        'min_epsilon': 0.01,  # Minimum exploration rate
+        'decay_rate': 0.995,  # Decay rate for epsilon
+        'num_episodes': 100,  # Number of training iterations
+        'batch_size': 16,
+        'memory_size': 100,
+        'target_update': 10
+    }
+    return config
+
+def main():
+    """
+    Main function to execute the RL agent for model selection.
+    """
+    # Load configuration
+    config = load_config()
+    alpha = config['alpha']
+    epsilon = config['epsilon']
+    num_episodes = config['num_episodes']
+    batch_size = config['batch_size']
+    memory_size = config['memory_size']
+    target_update = config['target_update']
+
+    # Define the task
+    task_prompt = input("Enter your Python coding task or question: ")
+
+    # Initialize models and capabilities
+    models_info = ollama.list().get("models", [])
+    model_names = [model['name'] for model in models_info]
+    model_capabilities = get_models_capabilities(model_names)
+
+    # Filter models that support 'generate'
+    capable_model_names = [name for name, caps in model_capabilities.items() if 'generate' in caps]
+
+    if not capable_model_names:
+        print("No models with 'generate' capability found.")
+        return
+
+    # Initialize RL components
+    state_size = 1  # The state is fixed (the task)
+    action_size = len(capable_model_names)
+    policy_net, target_net, optimizer = initialize_rl_components(state_size, action_size, alpha)
+    memory = []
+
+    # Start training loop
+    training_loop(task_prompt, capable_model_names, policy_net, target_net,
+                  optimizer, memory, config, model_capabilities)
+
+def training_loop(task_prompt, capable_model_names, policy_net, target_net,
+                  optimizer, memory, config, model_capabilities):
+    """
+    Runs the main training loop.
+
+    Args:
+        task_prompt (str): The user's task or question.
+        capable_model_names (list): List of models capable of 'generate'.
+        policy_net (nn.Module): The policy network.
+        target_net (nn.Module): The target network.
+        optimizer (torch.optim.Optimizer): The optimizer.
+        memory (list): Replay memory.
+        config (dict): Configuration parameters.
+        model_capabilities (dict): Capabilities of the models.
+    """
+    epsilon = config['epsilon']
+    num_episodes = config['num_episodes']
+    batch_size = config['batch_size']
+    memory_size = config['memory_size']
+    target_update = config['target_update']
+    min_epsilon = config['min_epsilon']
+    decay_rate = config['decay_rate']
+
+    for episode in range(num_episodes):
+        logging.info(f"Episode {episode + 1}/{num_episodes}")
+        state = torch.tensor([[0.0]], dtype=torch.float32)  # State is static
+        action = select_action(state, policy_net, epsilon)
+        selected_model = capable_model_names[action]
+        logging.info(f"Selected model: {selected_model}")
+
+        # Ensure the model is available
+        if not ensure_model_available(selected_model):
+            continue
+
+        response = generate_response(selected_model, task_prompt)
+
+        if response is None:
+            reward = 0
+        else:
+            logging.info(f"Response from {selected_model}:\n{response}")
+            reward = evaluate_response(response, action, capable_model_names, task_prompt)
+            logging.info(f"Reward (score): {reward}")
+
+        reward_tensor = torch.tensor([reward], dtype=torch.float32)
+
+        # Store transition in memory
+        memory.append((state, action, reward_tensor))
+
+        # Limit memory size
+        if len(memory) > memory_size:
+            memory.pop(0)
+
+        # Perform optimization step
+        if len(memory) >= batch_size:
+            optimize_model(memory, policy_net, optimizer, batch_size)
+
+        # Update target network periodically
+        if episode % target_update == 0:
+            target_net.load_state_dict(policy_net.state_dict())
+
+        # Adjust epsilon
+        epsilon = adjust_epsilon(epsilon, min_epsilon, decay_rate)
+
+    # Select and use the best model after training
+    use_best_model(task_prompt, capable_model_names, policy_net)
+
+def initialize_rl_components(state_size, action_size, alpha):
+    """
+    Initializes the policy network, target network, and optimizer.
+
+    Args:
+        state_size (int): Size of the state.
+        action_size (int): Size of the action space.
+        alpha (float): Learning rate.
+
+    Returns:
+        tuple: Policy network, target network, and optimizer.
+    """
+    policy_net = DeepQNetwork(state_size, action_size)
+    target_net = DeepQNetwork(state_size, action_size)
+    target_net.load_state_dict(policy_net.state_dict())
+    target_net.eval()
+    optimizer = optim.Adam(policy_net.parameters(), lr=alpha)
+    return policy_net, target_net, optimizer
+
+def optimize_model(memory, policy_net, optimizer, batch_size):
+    """
+    Performs a single optimization step.
+
+    Args:
+        memory (list): Replay memory.
+        policy_net (nn.Module): Policy network.
+        optimizer (torch.optim.Optimizer): Optimizer.
+        batch_size (int): Batch size.
+    """
+    batch = random.sample(memory, batch_size)
+    states, actions, rewards = zip(*batch)
+    states = torch.stack(states)
+    actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1)
+    rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1)
+
+    # Compute Q-values and targets
+    q_values = policy_net(states).gather(1, actions)
+    with torch.no_grad():
+        target_q_values = rewards
+
+    # Compute loss and optimize
+    loss = nn.functional.mse_loss(q_values, target_q_values)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+def select_action(state, policy_net, epsilon):
+    """
+    Selects an action (model index) based on the current policy.
+
+    Args:
+        state (torch.Tensor): The current state tensor.
+        policy_net (nn.Module): The policy network.
+        epsilon (float): The exploration rate.
+
+    Returns:
+        int: The index of the selected action.
     """
     if random.uniform(0, 1) < epsilon:
-        action = random.randrange(action_size)
-        print("Exploring: Randomly selected model.")
+        action = random.randrange(policy_net.fc2.out_features)
+        logging.info("Exploring: Randomly selected model.")
     else:
         with torch.no_grad():
             q_values = policy_net(state)
-            max_q = q_values.max().item()
-            actions = (q_values == max_q).nonzero(as_tuple=True)[1]
-            action = random.choice(actions.tolist())
-            print("Exploiting: Selected best model based on Q-values.")
+            action = int(q_values.argmax().item())
+        logging.info("Exploiting: Selected best model based on Q-values.")
     return action
 
 def generate_response(model, prompt):
     """
     Generates a response using the specified model and handles tool execution if needed.
+
+    Args:
+        model (str): The name of the model to use.
+        prompt (str): The user's prompt.
+
+    Returns:
+        str or None: The assistant's response, or None if an error occurred.
     """
     system_prompt = f"""You are an AI assistant specialized in Python programming. You have access to the following tools:
 
@@ -442,16 +623,25 @@ Now, proceed to assist the user."""
             return assistant_message['content'].strip()
 
     except Exception as e:
-        print(f"Error generating response with {model}: {str(e)}")
+        logging.error(f"Error generating response with {model}: {str(e)}")
         return None
 
-def evaluate_response(response, action):
+def evaluate_response(response, action, capable_model_names, task_prompt):
     """
     Evaluates the response using a reviewer model and returns a numerical score.
+
+    Args:
+        response (str): The response generated by the assistant model.
+        action (int): The index of the assistant model used.
+        capable_model_names (list): List of capable model names.
+        task_prompt (str): The user's task or question.
+
+    Returns:
+        int: A score between 1 and 10.
     """
-    reviewer_models = [model for model in capable_model_names if model != capable_model_names[action] and 'generate' in model_capabilities[model]]
+    reviewer_models = [model for i, model in enumerate(capable_model_names) if i != action]
     if not reviewer_models:
-        return 5  # Neutral score if no other models are available
+        return 5  # Neutral score if no reviewer models are available
     reviewer_model = random.choice(reviewer_models)
     review_prompt = f"""As a Python expert, evaluate the following response to the user's task: '{task_prompt}'
 
@@ -485,86 +675,103 @@ Justification: The code is accurate but lacks unit tests."""
                 return score
         return 5  # Neutral score if parsing fails
     except Exception as e:
-        print(f"Error evaluating response with {reviewer_model}: {str(e)}")
+        logging.error(f"Error evaluating response with {reviewer_model}: {str(e)}")
         return 5
 
-# Main training loop
-for episode in range(num_episodes):
-    print(f"\nEpisode {episode + 1}/{num_episodes}")
-    state = torch.tensor([[0.0]], dtype=torch.float32)  # State is fixed
-    action = select_action(state, epsilon)
-    selected_model = capable_model_names[action]
-    print(f"Selected model: {selected_model}")
+def adjust_epsilon(epsilon, min_epsilon=0.01, decay_rate=0.995):
+    """
+    Adjusts the exploration rate epsilon after each episode.
 
-    # Ensure the model is available
-    if not ensure_model_available(selected_model):
-        continue
+    Args:
+        epsilon (float): Current epsilon value.
+        min_epsilon (float): Minimum value for epsilon.
+        decay_rate (float): Decay rate.
 
-    capabilities = model_capabilities[selected_model]
+    Returns:
+        float: Updated epsilon value.
+    """
+    epsilon = max(min_epsilon, epsilon * decay_rate)
+    return epsilon
 
-    if 'generate' in capabilities:
-        response = generate_response(selected_model, task_prompt)
+def use_best_model(task_prompt, capable_model_names, policy_net):
+    """
+    Selects the best model after training and uses it to generate a response.
+
+    Args:
+        task_prompt (str): The task prompt provided by the user.
+        capable_model_names (list): List of capable model names.
+        policy_net (nn.Module): The trained policy network.
+    """
+    state = torch.tensor([[0.0]], dtype=torch.float32)
+    with torch.no_grad():
+        q_values = policy_net(state)
+        best_action = int(q_values.argmax().item())
+        best_model = capable_model_names[best_action]
+    logging.info(f"Best model after training: {best_model}")
+
+    # Ensure the best model is available
+    ensure_model_available(best_model)
+
+    # Generate final response using the best model
+    final_response = generate_response(best_model, task_prompt)
+    if final_response:
+        logging.info(f"Final response from best model ({best_model}):\n{final_response}")
     else:
-        print(f"Model {selected_model} does not support 'generate'. Skipping.")
-        continue
+        logging.error(f"Failed to generate response with best model {best_model}.")
 
-    if response is None:
-        reward = 0
-    else:
-        print(f"Response from {selected_model}:\n{response}")
-        reward = evaluate_response(response, action)
-        print(f"Reward (score): {reward}")
-    reward_tensor = torch.tensor([reward], dtype=torch.float32)
+    # Save the trained policy network
+    torch.save(policy_net.state_dict(), 'policy_net.pth')
+    logging.info("Model saved to policy_net.pth")
 
-    # Store transition in memory
-    memory.append((state, action, reward_tensor))
+def get_models_capabilities(model_names):
+    """
+    Retrieves the capabilities of each model.
 
-    # Limit memory size
-    if len(memory) > memory_size:
-        memory.pop(0)
+    Args:
+        model_names (list): List of model names.
 
-    # Sample from memory and update policy
-    if len(memory) >= batch_size:
-        batch = random.sample(memory, batch_size)
-        states, actions, rewards = zip(*batch)
-        states = torch.stack(states)
-        actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1)
-        rewards = torch.stack(rewards)
+    Returns:
+        dict: A dictionary mapping model names to their capabilities.
+    """
+    model_capabilities = {}
+    for model_name in model_names:
+        capabilities = get_model_capabilities(model_name)
+        if capabilities:
+            model_capabilities[model_name] = capabilities
+    return model_capabilities
 
-        q_values = policy_net(states).gather(1, actions)
-        with torch.no_grad():
-            target_q_values = rewards.unsqueeze(1)
-        loss = nn.functional.mse_loss(q_values, target_q_values)
+# Define the neural network model
+class DeepQNetwork(nn.Module):
+    """
+    Deep Q-Network model used for approximating the action-value function in Q-learning.
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    Attributes:
+        fc1 (nn.Linear): First fully connected layer.
+        relu (nn.ReLU): ReLU activation function.
+        fc2 (nn.Linear): Second fully connected layer.
+    """
 
-    # Update target network periodically
-    if episode % target_update == 0:
-        target_net.load_state_dict(policy_net.state_dict())
+    def __init__(self, num_inputs, num_outputs):
+        super(DeepQNetwork, self).__init__()
+        self.fc1 = nn.Linear(num_inputs, 128)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(128, num_outputs)
 
-# After training, select the best model
-state = torch.tensor([[0.0]], dtype=torch.float32)
-with torch.no_grad():
-    q_values = policy_net(state)
-    max_q = q_values.max().item()
-    actions = (q_values == max_q).nonzero(as_tuple=True)[1]
-    best_action = random.choice(actions.tolist())
-    best_model = capable_model_names[best_action]
-print(f"\nBest model after training: {best_model}")
+    def forward(self, x):
+        """
+        Forward pass of the network.
 
-# Ensure the best model is available
-ensure_model_available(best_model)
+        Args:
+            x (torch.Tensor): Input tensor.
 
-# Generate final response using the best model
-final_response = generate_response(best_model, task_prompt)
-if final_response:
-    print(f"\nFinal response from best model ({best_model}):\n{final_response}")
-else:
-    print(f"Failed to generate response with best model {best_model}.")
+        Returns:
+            torch.Tensor: Output tensor representing Q-values for each action.
+        """
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x
 
-# Save the model
-torch.save(policy_net.state_dict(), 'policy_net.pth')
-
-print("\nModel saved to policy_net.pth")
+# Main function
+if __name__ == "__main__":
+    main()
